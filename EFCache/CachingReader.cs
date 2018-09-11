@@ -8,6 +8,7 @@ namespace EFCache
     using System.Data;
     using System.Data.Common;
     using System.Diagnostics;
+    using System.Linq;
 
     internal class CachingReader : DbDataReader
     {
@@ -141,7 +142,7 @@ namespace EFCache
 
         public override int GetOrdinal(string name)
         {
-            throw new NotImplementedException();
+            return _tableMetadata.Select((x, i) => Tuple.Create(i, x)).FirstOrDefault(x => x.Item2.Name == name)?.Item1 ?? -1;
         }
 
         public override DataTable GetSchemaTable()
@@ -163,7 +164,8 @@ namespace EFCache
 
         public override int GetValues(object[] values)
         {
-            throw new NotImplementedException();
+            Array.Copy(_resultRowsEnumerator.Current, values, values.Length);
+            return values.Length;
         }
 
         public override bool HasRows
