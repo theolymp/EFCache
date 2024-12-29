@@ -1,20 +1,25 @@
 ﻿// Copyright (c) Pawel Kadluczka, Inc. All rights reserved. See License.txt in the project root for license information.
 
+#region usings
+
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Data.Entity.Core.Common.CommandTrees;
+using System.Data.Entity.Core.Mapping;
+using System.Data.Entity.Core.Metadata.Edm;
+using System.Diagnostics;
+using System.Linq;
+
+#endregion
+
 namespace EFCache
 {
-    using System;
-    using System.Collections.Generic;
-    using System.Collections.ObjectModel;
-    using System.Data.Entity.Core.Common.CommandTrees;
-    using System.Data.Entity.Core.Mapping;
-    using System.Data.Entity.Core.Metadata.Edm;
-    using System.Diagnostics;
-    using System.Linq;
-
     internal class CommandTreeFacts
     {
         private static readonly HashSet<string> NonDeterministicFunctions = new HashSet<string>(
-            new[] {
+            new[]
+            {
                 "Edm.CurrentDateTime",
                 "Edm.CurrentUtcDateTime",
                 "Edm.CurrentDateTimeOffsets",
@@ -44,20 +49,21 @@ namespace EFCache
                 var edmFunction = ((DbFunctionCommandTree)commandTree).EdmFunction;
 
                 var containerMapping =
-                    commandTree.MetadataWorkspace.GetItemCollection(DataSpace.CSSpace).GetItems<EntityContainerMapping>().Single();
+                    commandTree.MetadataWorkspace.GetItemCollection(DataSpace.CSSpace)
+                        .GetItems<EntityContainerMapping>().Single();
 
                 var entitySetMappings =
-                containerMapping.EntitySetMappings.Where(
-                    esm => esm.ModificationFunctionMappings.Any(
-                        mfm => mfm.DeleteFunctionMapping?.Function == edmFunction ||
-                        mfm.InsertFunctionMapping?.Function == edmFunction ||
-                        mfm.UpdateFunctionMapping?.Function == edmFunction));
+                    containerMapping.EntitySetMappings.Where(
+                        esm => esm.ModificationFunctionMappings.Any(
+                            mfm => mfm.DeleteFunctionMapping?.Function == edmFunction ||
+                                   mfm.InsertFunctionMapping?.Function == edmFunction ||
+                                   mfm.UpdateFunctionMapping?.Function == edmFunction));
 
                 AffectedEntitySets =
                     (from esm in entitySetMappings
-                    from etm in esm.EntityTypeMappings
-                    from mappingFragment in etm.Fragments.Where(f => f.StoreEntitySet != null)
-                    select mappingFragment.StoreEntitySet).Cast<EntitySetBase>().ToList().AsReadOnly();
+                        from etm in esm.EntityTypeMappings
+                        from mappingFragment in etm.Fragments.Where(f => f.StoreEntitySet != null)
+                        select mappingFragment.StoreEntitySet).Cast<EntitySetBase>().ToList().AsReadOnly();
             }
             else
             {
@@ -75,14 +81,15 @@ namespace EFCache
                 AffectedEntitySets = new ReadOnlyCollection<EntitySetBase>(visitor.EntitySets);
                 UsesNonDeterministicFunctions =
                     visitor.Functions.Any(f => NonDeterministicFunctions.Contains(
-                            string.Format("{0}.{1}", f.NamespaceName, f.Name)));
+                        string.Format("{0}.{1}", f.NamespaceName, f.Name)));
             }
 
             MetadataWorkspace = commandTree.MetadataWorkspace;
         }
 
         // testing only
-        internal CommandTreeFacts(ReadOnlyCollection<EntitySetBase> affectedEntitySets, bool isQuery, bool usesNonDeterministicFunctions, MetadataWorkspace metadataWorkspace = null)
+        internal CommandTreeFacts(ReadOnlyCollection<EntitySetBase> affectedEntitySets, bool isQuery,
+            bool usesNonDeterministicFunctions, MetadataWorkspace metadataWorkspace = null)
         {
             AffectedEntitySets = affectedEntitySets;
             IsQuery = isQuery;
@@ -94,9 +101,9 @@ namespace EFCache
 
         public bool IsQuery { get; private set; }
 
-        public bool UsesNonDeterministicFunctions { get; private set; }
-
         public MetadataWorkspace MetadataWorkspace { get; private set; }
+
+        public bool UsesNonDeterministicFunctions { get; private set; }
 
         private class CommandTreeVisitor : BasicCommandTreeVisitor
         {

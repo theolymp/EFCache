@@ -1,200 +1,154 @@
 ﻿// Copyright (c) Pawel Kadluczka, Inc. All rights reserved. See License.txt in the project root for license information.
 
+#region usings
+
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.Common;
+using System.Diagnostics;
+using System.Linq;
+using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
+
+#endregion
+
 namespace EFCache
 {
-    using System;
-    using System.Collections.Generic;
-    using System.Data;
-    using System.Data.Common;
-    using System.Diagnostics;
-    using System.Linq;
-    using System.Reflection;
-    using System.Threading;
-    using System.Threading.Tasks;
-
     internal class CachingCommand : DbCommand, ICloneable
     {
-        private readonly DbCommand _command;
-        private readonly CommandTreeFacts _commandTreeFacts;
-        private readonly CacheTransactionHandler _cacheTransactionHandler;
-        private readonly CachingPolicy _cachingPolicy;
-
-        public CachingCommand(DbCommand command, CommandTreeFacts commandTreeFacts, CacheTransactionHandler cacheTransactionHandler, CachingPolicy cachingPolicy)
+        public CachingCommand(DbCommand command, CommandTreeFacts commandTreeFacts,
+            CacheTransactionHandler cacheTransactionHandler, CachingPolicy cachingPolicy)
         {
             Debug.Assert(command != null, "command is null");
             Debug.Assert(commandTreeFacts != null, "commandTreeFacts is null");
             Debug.Assert(cacheTransactionHandler != null, "cacheTransactionHandler is null");
             Debug.Assert(cachingPolicy != null, "cachingPolicy is null");
 
-            _command = command;
-            _commandTreeFacts = commandTreeFacts;
-            _cacheTransactionHandler = cacheTransactionHandler;
-            _cachingPolicy = cachingPolicy;
+            WrappedCommand = command;
+            CommandTreeFacts = commandTreeFacts;
+            CacheTransactionHandler = cacheTransactionHandler;
+            CachingPolicy = cachingPolicy;
         }
 
-        internal CommandTreeFacts CommandTreeFacts
+        internal CacheTransactionHandler CacheTransactionHandler { get; }
+
+        internal CachingPolicy CachingPolicy { get; }
+
+        public override string CommandText
         {
-            get { return _commandTreeFacts; }
+            get => WrappedCommand.CommandText;
+            set => WrappedCommand.CommandText = value;
         }
 
-        internal CacheTransactionHandler CacheTransactionHandler
+        public override int CommandTimeout
         {
-            get { return _cacheTransactionHandler; }
+            get => WrappedCommand.CommandTimeout;
+            set => WrappedCommand.CommandTimeout = value;
         }
 
-        internal CachingPolicy CachingPolicy
+        internal CommandTreeFacts CommandTreeFacts { get; }
+
+        public override CommandType CommandType
         {
-            get { return _cachingPolicy; }
+            get => WrappedCommand.CommandType;
+            set => WrappedCommand.CommandType = value;
         }
 
-        internal DbCommand WrappedCommand
+        protected override DbConnection DbConnection
         {
-            get { return _command; }
+            get => WrappedCommand.Connection;
+            set => WrappedCommand.Connection = value;
+        }
+
+        protected override DbParameterCollection DbParameterCollection => WrappedCommand.Parameters;
+
+        protected override DbTransaction DbTransaction
+        {
+            get => WrappedCommand.Transaction;
+            set => WrappedCommand.Transaction = value;
+        }
+
+        public override bool DesignTimeVisible
+        {
+            get => WrappedCommand.DesignTimeVisible;
+            set => WrappedCommand.DesignTimeVisible = value;
         }
 
         private bool IsCacheable
         {
             get
             {
-                return _commandTreeFacts.IsQuery &&
+                return CommandTreeFacts.IsQuery &&
                        (IsQueryAlwaysCached ||
-                       !_commandTreeFacts.UsesNonDeterministicFunctions &&
-                       !IsQueryBlacklisted &&
-                       _cachingPolicy.CanBeCached(_commandTreeFacts.AffectedEntitySets, CommandText,
-                           Parameters.Cast<DbParameter>()
-                               .Select(p => new KeyValuePair<string, object>(p.ParameterName, p.Value))));
+                        (!CommandTreeFacts.UsesNonDeterministicFunctions &&
+                         !IsQueryBlacklisted &&
+                         CachingPolicy.CanBeCached(CommandTreeFacts.AffectedEntitySets, CommandText,
+                             Parameters.Cast<DbParameter>()
+                                 .Select(p => new KeyValuePair<string, object>(p.ParameterName, p.Value)))));
             }
         }
 
-        private bool IsQueryBlacklisted
+        private bool IsQueryAlwaysCached =>
+            AlwaysCachedQueriesRegistrar.Instance.IsQueryCached(
+                CommandTreeFacts.MetadataWorkspace, CommandText);
+
+        private bool IsQueryBlacklisted =>
+            BlacklistedQueriesRegistrar.Instance.IsQueryBlacklisted(
+                CommandTreeFacts.MetadataWorkspace, CommandText);
+
+        public override UpdateRowSource UpdatedRowSource
         {
-            get
-            {
-                return BlacklistedQueriesRegistrar.Instance.IsQueryBlacklisted(
-                    _commandTreeFacts.MetadataWorkspace, CommandText);
-            }
+            get => WrappedCommand.UpdatedRowSource;
+            set => WrappedCommand.UpdatedRowSource = value;
         }
 
-        private bool IsQueryAlwaysCached
+        internal DbCommand WrappedCommand { get; }
+
+        public object Clone()
         {
-            get
-            {
-                return AlwaysCachedQueriesRegistrar.Instance.IsQueryCached(
-                    _commandTreeFacts.MetadataWorkspace, CommandText);
-            }
+            var cloneableCommand = WrappedCommand as ICloneable;
+            if (cloneableCommand == null)
+                throw new InvalidOperationException(
+                    "The underlying DbCommand does not implement the ICloneable interface.");
+
+            var clonedCommand = (DbCommand)cloneableCommand.Clone();
+            return new CachingCommand(clonedCommand, CommandTreeFacts, CacheTransactionHandler, CachingPolicy);
         }
 
-        public override void Cancel()
+        private static ColumnMetadata[] GetTableMetadata(DbDataReader reader)
         {
-            _command.Cancel();
-        }
+            var columnMetadata = new ColumnMetadata[reader.FieldCount];
 
-        public override string CommandText
-        {
-            get
-            {
-                return _command.CommandText;
-            }
-            set
-            {
-                _command.CommandText = value;
-            }
-        }
+            for (var i = 0; i < reader.FieldCount; i++)
+                columnMetadata[i] =
+                    new ColumnMetadata(
+                        reader.GetName(i), reader.GetDataTypeName(i), reader.GetFieldType(i));
 
-        public override int CommandTimeout
-        {
-            get
-            {
-                return _command.CommandTimeout;
-            }
-            set
-            {
-                _command.CommandTimeout = value;
-            }
-        }
-
-        public override CommandType CommandType
-        {
-            get
-            {
-                return _command.CommandType;
-            }
-            set
-            {
-                _command.CommandType = value;
-            }
-        }
-
-        protected override DbParameter CreateDbParameter()
-        {
-            return _command.CreateParameter();
-        }
-
-        protected override DbConnection DbConnection
-        {
-            get
-            {
-                return _command.Connection;
-            }
-            set
-            {
-                _command.Connection = value;
-            }
-        }
-
-        protected override DbParameterCollection DbParameterCollection
-        {
-            get { return _command.Parameters; }
-        }
-
-        protected override DbTransaction DbTransaction
-        {
-            get
-            {
-                return _command.Transaction;
-            }
-            set
-            {
-                _command.Transaction = value;
-            }
-        }
-
-        public override bool DesignTimeVisible
-        {
-            get
-            {
-                return _command.DesignTimeVisible;
-            }
-            set
-            {
-                _command.DesignTimeVisible = value;
-            }
+            return columnMetadata;
         }
 
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
         {
             if (!IsCacheable)
             {
-                var result = _command.ExecuteReader(behavior);
+                var result = WrappedCommand.ExecuteReader(behavior);
 
-                if (!_commandTreeFacts.IsQuery)
-                {
-                    _cacheTransactionHandler.InvalidateSets(Transaction, _commandTreeFacts.AffectedEntitySets.Select(s => s.Name),
+                if (!CommandTreeFacts.IsQuery)
+                    CacheTransactionHandler.InvalidateSets(Transaction,
+                        CommandTreeFacts.AffectedEntitySets.Select(s => s.Name),
                         DbConnection);
-                }
 
                 return result;
             }
 
             var key = CreateKey();
 
-            object value;
-            if (_cacheTransactionHandler.GetItem(Transaction, key, DbConnection, out value))
-            {
+            if (CacheTransactionHandler.GetItem(Transaction, key, DbConnection, out var value))
                 return new CachingReader((CachedResults)value);
-            }
 
-            using (var reader = _command.ExecuteReader(behavior))
+            using (var reader = WrappedCommand.ExecuteReader(behavior))
             {
                 var queryResults = new List<object[]>();
 
@@ -209,30 +163,107 @@ namespace EFCache
             }
         }
 
+        private DbDataReader HandleCaching(DbDataReader reader, string key, List<object[]> queryResults)
+        {
+            var cachedResults =
+                new CachedResults(
+                    GetTableMetadata(reader), queryResults, reader.RecordsAffected);
+
+            CachingPolicy.GetCacheableRows(CommandTreeFacts.AffectedEntitySets, out var minCacheableRows,
+                out var maxCachableRows);
+
+            if (IsQueryAlwaysCached ||
+                (queryResults.Count >= minCacheableRows && queryResults.Count <= maxCachableRows))
+            {
+                CachingPolicy.GetExpirationTimeout(CommandTreeFacts.AffectedEntitySets, out var slidingExpiration,
+                    out var absoluteExpiration);
+
+                CacheTransactionHandler.PutItem(
+                    Transaction,
+                    key,
+                    cachedResults,
+                    CommandTreeFacts.AffectedEntitySets.Select(s => s.Name),
+                    slidingExpiration,
+                    absoluteExpiration,
+                    DbConnection);
+            }
+
+            return new CachingReader(cachedResults);
+        }
+
+        protected override DbParameter CreateDbParameter()
+        {
+            return WrappedCommand.CreateParameter();
+        }
+
+        public override int ExecuteNonQuery()
+        {
+            var recordsAffected = WrappedCommand.ExecuteNonQuery();
+
+            InvalidateSetsForNonQuery(recordsAffected);
+
+            return recordsAffected;
+        }
+
+        public override object ExecuteScalar()
+        {
+            if (!IsCacheable) return WrappedCommand.ExecuteScalar();
+
+            var key = CreateKey();
+
+            if (CacheTransactionHandler.GetItem(Transaction, key, DbConnection, out var value)) return value;
+
+            value = WrappedCommand.ExecuteScalar();
+
+            CachingPolicy.GetExpirationTimeout(CommandTreeFacts.AffectedEntitySets, out var slidingExpiration,
+                out var absoluteExpiration);
+
+            CacheTransactionHandler.PutItem(
+                Transaction,
+                key,
+                value,
+                CommandTreeFacts.AffectedEntitySets.Select(s => s.Name),
+                slidingExpiration,
+                absoluteExpiration,
+                DbConnection);
+
+            return value;
+        }
+
+        private string CreateKey()
+        {
+            return
+                string.Format(
+                    "{0}_{1}_{2}",
+                    Connection.Database,
+                    CommandText,
+                    string.Join(
+                        "_",
+                        Parameters.Cast<DbParameter>()
+                            .Select(p => string.Format("{0}={1}", p.ParameterName, p.Value))));
+        }
+
 #if !NET40
-        protected async override Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
+        protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior,
+            CancellationToken cancellationToken)
         {
             if (!IsCacheable)
             {
-                var result = await _command.ExecuteReaderAsync(behavior, cancellationToken);
+                var result = await WrappedCommand.ExecuteReaderAsync(behavior, cancellationToken);
 
-                if (!_commandTreeFacts.IsQuery)
-                {
-                    _cacheTransactionHandler.InvalidateSets(Transaction, _commandTreeFacts.AffectedEntitySets.Select(s => s.Name), DbConnection);
-                }
+                if (!CommandTreeFacts.IsQuery)
+                    CacheTransactionHandler.InvalidateSets(Transaction,
+                        CommandTreeFacts.AffectedEntitySets.Select(s => s.Name), DbConnection);
 
                 return result;
             }
 
             var key = CreateKey();
 
-            object value;
-            if (_cacheTransactionHandler.GetItem(Transaction, key, DbConnection, out value))
-            {
+            if (CacheTransactionHandler.GetItem(Transaction, key, DbConnection, out var value))
                 return new CachingReader((CachedResults)value);
-            }
 
-            using (var reader = await _command.ExecuteReaderAsync(behavior, cancellationToken))
+            using (var reader = await WrappedCommand.ExecuteReaderAsync(behavior, cancellationToken))
             {
                 var queryResults = new List<object[]>();
 
@@ -248,196 +279,67 @@ namespace EFCache
         }
 #endif
 
-        private DbDataReader HandleCaching(DbDataReader reader, string key, List<object[]> queryResults)
+#if !NET40
+        public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
         {
-            var cachedResults =
-                new CachedResults(
-                    GetTableMetadata(reader), queryResults, reader.RecordsAffected);
+            var recordsAffected = await WrappedCommand.ExecuteNonQueryAsync(cancellationToken);
 
-            int minCacheableRows, maxCachableRows;
-            _cachingPolicy.GetCacheableRows(_commandTreeFacts.AffectedEntitySets, out minCacheableRows,
-                out maxCachableRows);
+            InvalidateSetsForNonQuery(recordsAffected);
 
-            if (IsQueryAlwaysCached || (queryResults.Count >= minCacheableRows && queryResults.Count <= maxCachableRows))
-            {
-                TimeSpan slidingExpiration;
-                DateTimeOffset absoluteExpiration;
-                _cachingPolicy.GetExpirationTimeout(_commandTreeFacts.AffectedEntitySets, out slidingExpiration,
-                    out absoluteExpiration);
+            return recordsAffected;
+        }
+#endif
 
-                _cacheTransactionHandler.PutItem(
-                    Transaction,
-                    key,
-                    cachedResults,
-                    _commandTreeFacts.AffectedEntitySets.Select(s => s.Name),
-                    slidingExpiration,
-                    absoluteExpiration,
-                    DbConnection);
-            }
+#if !NET40
+        public override async Task<object> ExecuteScalarAsync(CancellationToken cancellationToken)
+        {
+            if (!IsCacheable) return await WrappedCommand.ExecuteScalarAsync(cancellationToken);
 
-            return new CachingReader(cachedResults);
+            var key = CreateKey();
+
+            if (CacheTransactionHandler.GetItem(Transaction, key, DbConnection, out var value)) return value;
+
+            value = await WrappedCommand.ExecuteScalarAsync(cancellationToken);
+
+            CachingPolicy.GetExpirationTimeout(CommandTreeFacts.AffectedEntitySets, out var slidingExpiration,
+                out var absoluteExpiration);
+
+            CacheTransactionHandler.PutItem(
+                Transaction,
+                key,
+                value,
+                CommandTreeFacts.AffectedEntitySets.Select(s => s.Name),
+                slidingExpiration,
+                absoluteExpiration,
+                DbConnection);
+
+            return value;
+        }
+#endif
+
+        public override void Cancel()
+        {
+            WrappedCommand.Cancel();
         }
 
         protected override void Dispose(bool disposing)
         {
-            _command.GetType()
+            WrappedCommand.GetType()
                 .GetMethod("Dispose", BindingFlags.Instance | BindingFlags.NonPublic)
-                .Invoke(_command, new object[] { disposing });
+                ?.Invoke(WrappedCommand, new object[] { disposing });
         }
-
-        private static ColumnMetadata[] GetTableMetadata(DbDataReader reader)
-        {
-            var columnMetadata = new ColumnMetadata[reader.FieldCount];
-
-            for (var i = 0; i < reader.FieldCount; i++)
-            {
-                columnMetadata[i] =
-                    new ColumnMetadata(
-                        reader.GetName(i), reader.GetDataTypeName(i), reader.GetFieldType(i));
-            }
-
-            return columnMetadata;
-        }
-
-        public override int ExecuteNonQuery()
-        {
-            var recordsAffected = _command.ExecuteNonQuery();
-
-            InvalidateSetsForNonQuery(recordsAffected);
-
-            return recordsAffected;
-        }
-
-#if !NET40
-        public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
-        {
-            var recordsAffected = await _command.ExecuteNonQueryAsync(cancellationToken);
-
-            InvalidateSetsForNonQuery(recordsAffected);
-
-            return recordsAffected;
-        }
-#endif
 
         private void InvalidateSetsForNonQuery(int recordsAffected)
         {
-            if (recordsAffected > 0 && _commandTreeFacts.AffectedEntitySets.Any())
-            {
-                _cacheTransactionHandler.InvalidateSets(Transaction, _commandTreeFacts.AffectedEntitySets.Select(s => s.Name),
+            if (recordsAffected > 0 && CommandTreeFacts.AffectedEntitySets.Any())
+                CacheTransactionHandler.InvalidateSets(Transaction,
+                    CommandTreeFacts.AffectedEntitySets.Select(s => s.Name),
                     DbConnection);
-            }
         }
-
-        public override object ExecuteScalar()
-        {
-            if (!IsCacheable)
-            {
-                return _command.ExecuteScalar();
-            }
-
-            var key = CreateKey();
-
-            object value;
-
-            if (_cacheTransactionHandler.GetItem(Transaction, key, DbConnection, out value))
-            {
-                return value;
-            }
-
-            value = _command.ExecuteScalar();
-
-            TimeSpan slidingExpiration;
-            DateTimeOffset absoluteExpiration;
-            _cachingPolicy.GetExpirationTimeout(_commandTreeFacts.AffectedEntitySets, out slidingExpiration, out absoluteExpiration);
-
-            _cacheTransactionHandler.PutItem(
-                Transaction,
-                key,
-                value,
-                _commandTreeFacts.AffectedEntitySets.Select(s => s.Name),
-                slidingExpiration,
-                absoluteExpiration,
-                DbConnection);
-
-            return value;
-        }
-
-#if !NET40
-        public async override Task<object> ExecuteScalarAsync(CancellationToken cancellationToken)
-        {
-            if (!IsCacheable)
-            {
-                return await _command.ExecuteScalarAsync(cancellationToken);
-            }
-
-            var key = CreateKey();
-
-            object value;
-
-            if (_cacheTransactionHandler.GetItem(Transaction, key, DbConnection, out value))
-            {
-                return value;
-            }
-
-            value = await _command.ExecuteScalarAsync(cancellationToken);
-
-            TimeSpan slidingExpiration;
-            DateTimeOffset absoluteExpiration;
-            _cachingPolicy.GetExpirationTimeout(_commandTreeFacts.AffectedEntitySets, out slidingExpiration, out absoluteExpiration);
-
-            _cacheTransactionHandler.PutItem(
-                Transaction,
-                key,
-                value,
-                _commandTreeFacts.AffectedEntitySets.Select(s => s.Name),
-                slidingExpiration,
-                absoluteExpiration,
-                DbConnection);
-
-            return value;
-        }
-#endif
 
         public override void Prepare()
         {
-            _command.Prepare();
-        }
-
-        public override UpdateRowSource UpdatedRowSource
-        {
-            get
-            {
-                return _command.UpdatedRowSource;
-            }
-            set
-            {
-                _command.UpdatedRowSource = value;
-            }
-        }
-
-        private string CreateKey()
-        {
-            return
-                string.Format(
-                "{0}_{1}_{2}",
-                Connection.Database,
-                CommandText,
-                string.Join(
-                    "_",
-                    Parameters.Cast<DbParameter>()
-                    .Select(p => string.Format("{0}={1}", p.ParameterName, p.Value))));
-        }
-
-        public object Clone()
-        {
-            var cloneableCommand = _command as ICloneable;
-            if (cloneableCommand == null)
-            {
-                throw new InvalidOperationException("The underlying DbCommand does not implement the ICloneable interface.");
-            }
-
-            var clonedCommand = (DbCommand)cloneableCommand.Clone();
-            return new CachingCommand(clonedCommand, _commandTreeFacts, _cacheTransactionHandler, _cachingPolicy);
+            WrappedCommand.Prepare();
         }
     }
 }

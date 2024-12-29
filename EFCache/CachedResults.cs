@@ -1,37 +1,28 @@
 ﻿// Copyright (c) Pawel Kadluczka, Inc. All rights reserved. See License.txt in the project root for license information.
 
+#region usings
+
+using System;
+using System.Collections.Generic;
+
+#endregion
+
 namespace EFCache
 {
-    using System;
-    using System.Collections.Generic;
-
     [Serializable]
     internal class CachedResults
     {
-        private readonly ColumnMetadata[] _tableMetadata;
-        private readonly List<object[]> _results;
-        private readonly int _recordsAffected;
-
         public CachedResults(ColumnMetadata[] tableMetadata, List<object[]> results, int recordsAffected)
         {
-            _tableMetadata = tableMetadata;
-            _results = results;
-            _recordsAffected = recordsAffected;
+            TableMetadata = tableMetadata;
+            Results = results;
+            RecordsAffected = recordsAffected;
         }
 
-        public ColumnMetadata[] TableMetadata
-        {
-            get { return _tableMetadata; }
-        }
+        public int RecordsAffected { get; }
 
-        public List<object[]> Results
-        {
-            get { return _results; }
-        }
+        public List<object[]> Results { get; }
 
-        public int RecordsAffected
-        {
-            get { return _recordsAffected; }
-        }
+        public ColumnMetadata[] TableMetadata { get; }
     }
 }
